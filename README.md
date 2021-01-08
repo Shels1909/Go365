@@ -106,6 +106,12 @@ $ ./Go365 -h
      -url <string>          Endpoint to send requests to
                               - Amazon API Gateway 'Invoke URL'
                               (-url https://k62g98dne3.execute-api.us-east-2.amazonaws.com/login)
+     -lt <int>              Number of account lockout responses before the spray is terminated
+                              - Default: 10 lockouts
+                              (-lt 5)
+     -v                     Validate whether the domain is using O365 via the GetUserRealm 
+                              - Exits program if response is unkown
+                              - prints out the ADFS Auth URL if Federated authentication
      -debug                 Debug mode.
                               - Print xml response
 ```
